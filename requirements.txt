@@ -1,0 +1,5 @@
+numpy
+pandas
+socket
+sqlalchemy==1.4
+logging
