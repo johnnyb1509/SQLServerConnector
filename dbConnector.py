@@ -368,11 +368,10 @@ class dbJob():
 #     import pandas as pd
 #     import os
 #     import socket
-#     # server = 'H11DES02023\RS_DB' # test at BIDV Company
-#     server = f'{socket.gethostname()}.local' # test at HOMESERVER
-#     database = 'macro_data'
-#     username = 'sa' # 'bot_test'
-#     password = 'nguyenson1509' # 'Nguyenson!@#'   
+#     server = 
+#     database = 
+#     username = 
+#     password = 
 #     driver = '{ODBC Driver 17 for SQL Server}' # at NS_HomeServer
     
     
