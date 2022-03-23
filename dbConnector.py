@@ -78,8 +78,6 @@ class dbJob():
                             Elif is_exact == True -> id_date number of row want to get 
                                         (e.g row with id_date == <arg_choice>)
             tableName (str): Name of the table
-        Return:
-            pd.DataFrame
         """
         short_table = None
         if is_exact == False:
@@ -241,8 +239,7 @@ class dbJob():
             columnName (_type_): _description_
             data_type (_type_): _description_
         """
-        query = f"ALTER TABLE dbo.{targetTableName} \
-                              ADD {columnName} {data_type} NULL;"
+        query = f"ALTER TABLE [dbo].[{targetTableName}] ADD [{columnName}] {data_type} NULL"
         with self.engine.connect() as conn:
             conn.execute(query)
             conn.close()
@@ -371,12 +368,12 @@ class dbJob():
 #     import pandas as pd
 #     import os
 #     import socket
-
-#     server = 
-#     database = 
-#     username = 
-#     password =  
-#     driver = '{ODBC Driver 17 for SQL Server}'
+#     # server = 'H11DES02023\RS_DB' # test at BIDV Company
+#     server = f'{socket.gethostname()}.local' # test at HOMESERVER
+#     database = 'macro_data'
+#     username = 'sa' # 'bot_test'
+#     password = 'nguyenson1509' # 'Nguyenson!@#'   
+#     driver = '{ODBC Driver 17 for SQL Server}' # at NS_HomeServer
     
     
 #     # INSERT DATA
