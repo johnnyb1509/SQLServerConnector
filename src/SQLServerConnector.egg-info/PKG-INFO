@@ -1,0 +1,16 @@
+Metadata-Version: 2.1
+Name: SQLServerConnector
+Version: 0.0.1
+Summary: A small tool for connecting to SQL SERVER with very basic functions
+Author-email: johnnyb1509 <150994johnnyb@gmail.com>
+Project-URL: Homepage, https://github.com/johnnyb1509/SQLServerConnector
+Project-URL: Bug Tracker, https://github.com/johnnyb1509/SQLServerConnector/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+
+# SQLServerConnector
+DB JOB FOR SPECIFIC PROJECT. USE WITH CARE, THIS MODULE IS NOT SUCH GENERAL FOR ALL CASE
+ONLY RUN ON USING SQLALCHEMY < 2.0

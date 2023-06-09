@@ -1,5 +1,5 @@
 numpy
 pandas
 socket
-sqlalchemy==1.4
-logging
+sqlalchemy==1.4.6
+loguru
