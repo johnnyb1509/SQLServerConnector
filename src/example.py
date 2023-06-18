@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import numpy as np 
 from .utils import defineLoguru
-from .dbConnector import *
+from .SQLServerConnector import *
 import argparse
 
 parser = argparse.ArgumentParser(description='TESTING MODULE')
