@@ -1,0 +1,7 @@
+# Thông tin kết nối Database
+# Lưu ý: Đảm bảo máy tính đã cài đặt ODBC Driver 17 for SQL Server
+db_info:
+  server: "10.21.17.139,1433"  # Ví dụ: localhost hoặc 192.168.1.1
+  database: "YOUR_DATABASE_NAME"    # Ví dụ: TestDB
+  username: "YOUR_USERNAME"         # Ví dụ: sa
+  password: "YOUR_PASSWORD"         # Mật khẩu

@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Configuration & Secrets (QUAN TRỌNG: Không up file chứa pass DB)
+# config/db_config.yaml
+*.env
+
+# IDE settings
+.vscode/
+.idea/
