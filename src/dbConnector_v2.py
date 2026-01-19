@@ -386,21 +386,21 @@ class SQLServerConnector:
 # ENTRY POINT
 # ========================================================
 
-def get_db_connector(yaml_path: Optional[str] = None, env_prefix: str = "DB") -> SQLServerConnector:
-    """Factory function to initialize connector."""
-    if yaml_path and os.path.exists(yaml_path):
-        with open(yaml_path, 'r') as f:
-            config = yaml.safe_load(f).get('db_info', {})
-            return SQLServerConnector(
-                config.get('server'), 
-                config.get('database'), 
-                config.get('username'), 
-                config.get('password')
-            )
-    else:
-        return SQLServerConnector(
-            os.environ.get(f'{env_prefix}_SERVER'),
-            os.environ.get(f'{env_prefix}_NAME'),
-            os.environ.get(f'{env_prefix}_USER'),
-            os.environ.get(f'{env_prefix}_PASS')
-        )
+# def get_db_connector(yaml_path: Optional[str] = None, env_prefix: str = "DB") -> SQLServerConnector:
+#     """Factory function to initialize connector."""
+#     if yaml_path and os.path.exists(yaml_path):
+#         with open(yaml_path, 'r') as f:
+#             config = yaml.safe_load(f).get('db_info', {})
+#             return SQLServerConnector(
+#                 config.get('server'), 
+#                 config.get('database'), 
+#                 config.get('username'), 
+#                 config.get('password')
+#             )
+#     else:
+#         return SQLServerConnector(
+#             os.environ.get(f'{env_prefix}_SERVER'),
+#             os.environ.get(f'{env_prefix}_NAME'),
+#             os.environ.get(f'{env_prefix}_USER'),
+#             os.environ.get(f'{env_prefix}_PASS')
+#         )
