@@ -1,0 +1,34 @@
+# File: pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlServerConnector"
+version = "0.1.0"
+description = "A custom SQL Server Connector for ETL processes with Pandas"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+  { name="Nguyen Minh Son", email="nguyen.minhson1511@gmail.com" },
+]
+keywords = ["sql", "etl", "pandas", "sqlalchemy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+# Tự động cài các thư viện này khi user cài package của bạn
+dependencies = [
+    "pandas>=1.5.0",
+    "numpy",
+    "sqlalchemy>=2.0.0",
+    "pyodbc",
+    "pyyaml",
+    "loguru",
+    "jupyterlab"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/johnnyb1509/sqlServerConnector"

@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/__init__.py
+src/connector.py
+src/sqlServerConnector.egg-info/PKG-INFO
+src/sqlServerConnector.egg-info/SOURCES.txt
+src/sqlServerConnector.egg-info/dependency_links.txt
+src/sqlServerConnector.egg-info/requires.txt
+src/sqlServerConnector.egg-info/top_level.txt

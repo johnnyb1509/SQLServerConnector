@@ -1,0 +1,7 @@
+pandas>=1.5.0
+numpy
+sqlalchemy>=2.0.0
+pyodbc
+pyyaml
+loguru
+jupyterlab
