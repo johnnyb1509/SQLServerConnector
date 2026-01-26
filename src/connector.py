@@ -23,6 +23,8 @@ class SQLServerConnector:
     - Full Unicode/Vietnamese Support (NVARCHAR + UTF8).
     - Automatic Schema Evolution (adds missing columns).
     - Automatic Primary Key detection and creation.
+    - [NEW] Automatic Deduplication of source data before Upsert.
+    - [NEW] Prevents numeric conversion on Key columns.
     """
 
     def __init__(self, server: str, database: str, username: str, password: str, driver: str = 'ODBC Driver 17 for SQL Server'):
@@ -146,7 +148,7 @@ class SQLServerConnector:
                     match_columns: Optional[List[str]] = None,
                     auto_evolve_schema: bool = True):
         """
-        Main ETL Function with Unicode Support.
+        Main ETL Function with Unicode Support and Auto-Deduplication.
         
         Args:
             df: The new data to push.
@@ -159,8 +161,19 @@ class SQLServerConnector:
             logger.warning(f"Dataframe for {target_table} is empty. Skipping.")
             return
 
-        # 1. PRE-PROCESS DATA
-        df_clean = self._sanitize_dataframe(df)
+        # 0. DETERMINE JOIN KEYS FIRST
+        # We need this early to protect these keys from being converted to floats during sanitization
+        if match_columns:
+            join_keys = match_columns
+        elif primary_key in df.columns:
+            join_keys = [primary_key]
+        else:
+            # Fallback if table doesn't exist yet or columns missing, handled later but setup empty here
+            join_keys = []
+
+        # 1. PRE-PROCESS DATA (With Key Protection)
+        # Pass join_keys to exclude them from numeric conversion (prevents "123" -> 123.0)
+        df_clean = self._sanitize_dataframe(df, exclude_cols=join_keys)
         
         # 2. CHECK TARGET TABLE
         if not self.check_table_exists(target_table):
@@ -172,17 +185,26 @@ class SQLServerConnector:
         if auto_evolve_schema:
             self._sync_columns(df_clean, target_table)
 
-        # 4. DETERMINE MATCHING LOGIC
-        if match_columns:
-            join_keys = match_columns
-        elif primary_key in df_clean.columns:
-            join_keys = [primary_key]
-        else:
-            logger.error(f"CRITICAL: Primary Key '{primary_key}' is missing from DataFrame (likely Auto-Increment).")
-            logger.error("You MUST provide 'match_columns' to identify which rows to update.")
-            raise ValueError("Missing match keys for Identity Column Upsert.")
+        # 4. RE-VALIDATE JOIN KEYS
+        if not join_keys:
+            # Try to infer if not provided
+            if primary_key in df_clean.columns:
+                join_keys = [primary_key]
+            else:
+                logger.error(f"CRITICAL: Primary Key '{primary_key}' is missing from DataFrame.")
+                logger.error("You MUST provide 'match_columns' to identify which rows to update.")
+                raise ValueError("Missing match keys for Identity Column Upsert.")
+        
+        # 5. AUTO DEDUPLICATE SOURCE (CRITICAL FIX)
+        # SQL MERGE fails if source has duplicates. We enforce uniqueness on join keys here.
+        initial_count = len(df_clean)
+        df_clean = df_clean.drop_duplicates(subset=join_keys, keep='last')
+        final_count = len(df_clean)
+        
+        if initial_count != final_count:
+            logger.warning(f"Upsert Safety: Automatically dropped {initial_count - final_count} duplicate rows in source based on keys {join_keys}.")
 
-        # 5. EXECUTE UPSERT VIA STAGING
+        # 6. EXECUTE UPSERT VIA STAGING
         self._execute_merge_upsert(df_clean, target_table, join_keys)
 
     def _execute_merge_upsert(self, df: pd.DataFrame, target_table: str, join_keys: List[str]):
@@ -322,22 +344,25 @@ class SQLServerConnector:
     # HELPER: DATA CLEANING
     # ========================================================
 
-    def _sanitize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Cleans numeric strings, NaT, and NaN values."""
+    def _sanitize_dataframe(self, df: pd.DataFrame, exclude_cols: List[str] = []) -> pd.DataFrame:
+        """
+        Cleans numeric strings, NaT, and NaN values.
+        Args:
+            df: Input dataframe.
+            exclude_cols: Columns to skip numeric conversion (e.g. IDs).
+        """
         df = df.copy()
         
-        # 1. Clean Numeric Strings
+        # 1. Clean Numeric Strings (Skip excluded columns)
         for col in df.select_dtypes(include=['object']).columns:
-            # Only try to convert to float if it looks like a number (digits or currency symbols)
-            # Avoid trying to convert Vietnamese text columns
+            if col in exclude_cols:
+                continue # PROTECT ID COLUMNS FROM BEING CONVERTED TO FLOATS
+                
+            # Only try to convert to float if it looks like a number
             sample = df[col].dropna().head(10).astype(str).tolist()
             if any(any(char.isdigit() for char in str(x)) for x in sample):
                  try:
-                     # Attempt conversion, but strictly ignore errors so we don't break text columns
-                     # We use a temp series to check if conversion is successful for majority
                      temp = df[col].apply(self._clean_numeric_string)
-                     # If the column was actually text (e.g., "Hà Nội"), _clean_numeric_string returns the original string.
-                     # We trust _clean_numeric_string to be safe.
                      df[col] = temp
                  except:
                      pass 
@@ -362,7 +387,6 @@ class SQLServerConnector:
         if not s: return None
         
         # Heuristic: If it contains many letters (excluding K,M,B,T for billions), it's probably text
-        # Count letters
         alpha_count = sum(c.isalpha() for c in s)
         if alpha_count > 1 and s[-1] not in ['K', 'M', 'B', 'T']:
             return value # It's likely text (e.g. "Cổ phiếu")
@@ -381,26 +405,3 @@ class SQLServerConnector:
             return float(s_clean)
         except ValueError:
             return value
-
-# ========================================================
-# ENTRY POINT
-# ========================================================
-
-# def get_db_connector(yaml_path: Optional[str] = None, env_prefix: str = "DB") -> SQLServerConnector:
-#     """Factory function to initialize connector."""
-#     if yaml_path and os.path.exists(yaml_path):
-#         with open(yaml_path, 'r') as f:
-#             config = yaml.safe_load(f).get('db_info', {})
-#             return SQLServerConnector(
-#                 config.get('server'), 
-#                 config.get('database'), 
-#                 config.get('username'), 
-#                 config.get('password')
-#             )
-#     else:
-#         return SQLServerConnector(
-#             os.environ.get(f'{env_prefix}_SERVER'),
-#             os.environ.get(f'{env_prefix}_NAME'),
-#             os.environ.get(f'{env_prefix}_USER'),
-#             os.environ.get(f'{env_prefix}_PASS')
-#         )
