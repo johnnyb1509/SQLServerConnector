@@ -1,31 +1,32 @@
 import os
-import numpy as np
 import pandas as pd
+import numpy as np
 import uuid
-from typing import List, Optional, Dict, Union, Any
+import sqlalchemy
+from typing import List, Optional, Dict, Union, Any, Literal
 from loguru import logger
-from sqlalchemy import create_engine, inspect, text, URL
+from sqlalchemy import create_engine, text, URL, inspect
 from sqlalchemy.types import NVARCHAR, FLOAT, INTEGER, DATE, DATETIME, BIGINT
-from sqlalchemy.exc import SQLAlchemyError
 
 class SQLServerConnector:
     """
-    A robust, SQLAlchemy 2.0 compliant connector for SQL Server designed for ETL processes.
-    
-    Features:
-    - High-performance Upserts (Merge) using Unique Staging Tables.
-    - Advanced Conflict Resolution: 'sum' (for finance) or 'last' (for metadata).
-    - Automatic Schema Evolution and Primary Key management.
-    - Unicode/Vietnamese support (NVARCHAR + UTF8).
+    Trình kết nối SQL Server chuẩn hóa (Full Features - Fixed Missing Attribute).
+    Tích hợp:
+    - Fast Executemany (Tốc độ cao).
+    - Unicode Support (NVARCHAR).
+    - Upsert Strategy (Last/Skip).
+    - Schema Evolution.
+    - Helper methods: check_table_exists.
     """
 
-    def __init__(self, server: str, database: str, username: str, password: str, driver: str = 'ODBC Driver 17 for SQL Server'):
+    def __init__(self, server: str, database: str, username: str, password: str, driver: str = 'ODBC Driver 17 for SQL Server', **kwargs):
         self.server = server
         self.database = database
         self.username = username
         self.password = password
         self.driver = driver
         
+        # Tạo URL kết nối
         self.connection_url = URL.create(
             "mssql+pyodbc",
             query={
@@ -35,188 +36,209 @@ class SQLServerConnector:
                     f"DATABASE={self.database};"
                     f"UID={self.username};"
                     f"PWD={self.password};"
-                    "Charsets=UTF-8;"
-                ),
-                "fast_executemany": "True" 
+                    "Encrypt=no;TrustServerCertificate=yes;"
+                )
             }
         )
         
+        # Engine với fast_executemany=True
         self.engine = create_engine(
-            self.connection_url, 
-            pool_pre_ping=True,  
-            pool_size=20, 
-            max_overflow=10
+            self.connection_url,
+            fast_executemany=True, 
+            pool_pre_ping=True
         )
-        
-    def dispose(self):
-        self.engine.dispose()
-        logger.info("Database engine disposed.")
 
-    # ========================================================
-    # SCHEMA HELPERS
-    # ========================================================
-
-    def check_table_exists(self, table_name: str) -> bool:
-        return inspect(self.engine).has_table(table_name)
-
-    def get_columns_info(self, table_name: str) -> Dict[str, str]:
-        inspector = inspect(self.engine)
-        return {col['name']: str(col['type']) for col in inspector.get_columns(table_name)}
-
-    # ========================================================
-    # CORE ETL METHODS
-    # ========================================================
-
-    def upsert_data(self, df: pd.DataFrame, target_table: str, primary_key: str = None, 
-                    match_columns: Optional[List[str]] = None, auto_evolve_schema: bool = True,
-                    conflict_strategy: str = 'sum'):
-        if df.empty: return
-
-        join_keys = match_columns if match_columns else ([primary_key] if primary_key else [])
-        
-        # 1. Sanitize & lọc lấy các cột cần thiết
-        # Chỉ giữ lại join_keys và các cột có dữ liệu để tránh "phân mảnh" dữ liệu khi gộp
-        df_clean = self._sanitize_dataframe(df, exclude_cols=join_keys)
-        
-        # 2. Xử lý trùng lặp triệt để
-        initial_len = len(df_clean)
-        if conflict_strategy == 'sum':
-            # Xác định cột số để cộng dồn
-            num_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
-            num_cols = [c for c in num_cols if c not in join_keys]
-            
-            # Chỉ gộp trên các cột số, các cột text khác key sẽ bị loại bỏ hoặc lấy dòng đầu
-            # Điều này đảm bảo kết quả trả về CHỈ CÓ 1 DÒNG cho mỗi cặp Key
-            agg_logic = {col: 'sum' for col in num_cols}
-            
-            # Đối với các cột không phải số và không phải key, chúng ta lấy dòng đầu tiên
-            other_cols = [c for c in df_clean.columns if c not in join_keys and c not in num_cols]
-            for c in other_cols:
-                agg_logic[c] = 'first'
-                
-            df_clean = df_clean.groupby(join_keys, as_index=False).agg(agg_logic)
-        else:
-            df_clean = df_clean.drop_duplicates(subset=join_keys, keep='last')
-
-        if len(df_clean) < initial_len:
-            logger.info(f"Conflict Resolution ({conflict_strategy}): Combined {initial_len} -> {len(df_clean)} rows.")
-
-        # 3. Schema Management
-        if not self.check_table_exists(target_table):
-            self._create_table_from_df(df_clean, target_table, primary_key)
-        elif auto_evolve_schema:
-            self._sync_columns(df_clean, target_table)
-
-        # 4. Execute Merge
-        self._execute_merge_upsert(df_clean, target_table, join_keys)
-
-    def _execute_merge_upsert(self, df: pd.DataFrame, target_table: str, join_keys: List[str]):
-        # Use a unique staging name to support parallel tasks
-        unique_id = str(uuid.uuid4()).replace('-', '')[:10]
-        staging_table = f"##stg_{unique_id}_{target_table[:20]}"
-        
-        with self.engine.begin() as conn: 
-            try:
-                # Explicit mapping for Unicode
-                dtype_map = {col: NVARCHAR(None) for col in df.columns if df[col].dtype == 'object'}
-                df.to_sql(staging_table, conn, if_exists='replace', index=False, dtype=dtype_map)
-                
-                source_cols = list(df.columns)
-                on_clause = " AND ".join([f"Target.[{k}] = Source.[{k}]" for k in join_keys])
-                update_stmts = [f"Target.[{col}] = Source.[{col}]" for col in source_cols if col not in join_keys]
-                
-                insert_cols = ", ".join([f"[{col}]" for col in source_cols])
-                insert_vals = ", ".join([f"Source.[{col}]" for col in source_cols])
-                
-                sql = f"""
-                MERGE [{target_table}] AS Target USING [{staging_table}] AS Source
-                ON ({on_clause})
-                {f"WHEN MATCHED THEN UPDATE SET {', '.join(update_stmts)}" if update_stmts else ""}
-                WHEN NOT MATCHED BY TARGET THEN INSERT ({insert_cols}) VALUES ({insert_vals});
-                """
-                conn.execute(text(sql))
-                conn.execute(text(f"DROP TABLE [{staging_table}]"))
-                logger.success(f"Successfully upserted {len(df)} rows to {target_table}.")
-            except Exception as e:
-                logger.error(f"Merge execution failed for {target_table}: {e}")
-                raise
-
-    # ========================================================
-    # UTILS: CLEANING & SCHEMA
-    # ========================================================
-
-    def _sanitize_dataframe(self, df: pd.DataFrame, exclude_cols: List[str]) -> pd.DataFrame:
-        df = df.copy()
-        # Clean Dates
-        for col in df.select_dtypes(include=['datetime']).columns:
-            df[col] = df[col].replace({pd.NaT: None})
-        # Clean NaN/None
-        df = df.replace({np.nan: None})
-        df = df.where(pd.notnull(df), None)
-        return df
-
-    def _create_table_from_df(self, df: pd.DataFrame, table_name: str, primary_key: Optional[str]):
-        dtype_map = {col: NVARCHAR(None) for col in df.columns if df[col].dtype == 'object'}
-        df.to_sql(table_name, self.engine, index=False, dtype=dtype_map)
-        if primary_key and primary_key in df.columns:
-            self.set_primary_key(table_name, primary_key, df[primary_key].dtype)
-
-    def set_primary_key(self, table_name: str, column_name: str, source_dtype):
-        sql_type = "NVARCHAR(450)" if pd.api.types.is_string_dtype(source_dtype) else "BIGINT"
-        with self.engine.connect() as conn:
-            with conn.begin():
-                conn.execute(text(f"ALTER TABLE [{table_name}] ALTER COLUMN [{column_name}] {sql_type} NOT NULL"))
-                conn.execute(text(f"ALTER TABLE [{table_name}] ADD PRIMARY KEY ([{column_name}])"))
-
-    def _sync_columns(self, df: pd.DataFrame, table_name: str):
-        db_cols = {k.lower() for k in self.get_columns_info(table_name).keys()}
-        new_cols = [c for c in df.columns if c.lower() not in db_cols]
-        
-        if new_cols:
-            with self.engine.connect() as conn:
-                for col in new_cols:
-                    sql_type = "NVARCHAR(MAX)" if df[col].dtype == 'object' else "FLOAT"
-                    conn.execute(text(f"ALTER TABLE [{table_name}] ADD [{col}] {sql_type} NULL"))
-                conn.commit()
-
-    # ========================================================
-    # DATA RETRIEVAL METHODS
-    # ========================================================
-    def get_data(self,  query: str, params: Optional[Dict[str, Any]] = None, chunksize: Optional[int] = None) -> Union[pd.DataFrame, Any]:
-        """
-        Executes a SQL query and returns a Pandas DataFrame.
-        
-        Args:
-            query (str): The SQL query string. Use :param_name for parameters.
-            params (dict, optional): Dictionary of parameters to bind to the query.
-            chunksize (int, optional): If specified, returns an iterator where each chunk is the given size.
-        
-        Returns:
-            pd.DataFrame or Iterator[pd.DataFrame]
-        """
+    def get_data(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+        """Thực thi SELECT và trả về DataFrame"""
         try:
             with self.engine.connect() as conn:
-                # Use text() explicitly for SQLAlchemy 2.0 compatibility
-                sql_query = text(query)
-                
-                # If chunksize is provided, read_sql returns a generator
-                result = pd.read_sql(
-                    sql_query, 
-                    conn, 
-                    params=params, 
-                    chunksize=chunksize
-                )
-                
-                if chunksize is None:
-                    logger.info(f"Successfully retrieved {len(result)} rows.")
-                else:
-                    logger.info(f"Retrieving data in chunks of {chunksize} rows.")
-                    
-                return result
-                
-        except SQLAlchemyError as e:
-            logger.error(f"Failed to retrieve data: {e}")
-            raise
+                return pd.read_sql(text(query), conn, params=params)
         except Exception as e:
-            logger.error(f"An unexpected error occurred during get_data: {e}")
-            raise
+            logger.error(f"Get data error: {e}")
+            raise e
+
+    def execute_query(self, query: str, params: Optional[Dict] = None):
+        """Thực thi lệnh không trả về dữ liệu (UPDATE, DELETE, etc.)"""
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(query), params or {})
+        except Exception as e:
+            logger.error(f"Execute query error: {e}")
+            raise e
+
+    # --- [ĐÃ BỔ SUNG LẠI HÀM NÀY] ---
+    def check_table_exists(self, table_name: str) -> bool:
+        """Kiểm tra bảng có tồn tại trong database không"""
+        try:
+            inspector = inspect(self.engine)
+            return inspector.has_table(table_name)
+        except Exception as e:
+            logger.error(f"Check table exists failed: {e}")
+            return False
+    # --------------------------------
+
+    def _generate_dtype_mapping(self, df: pd.DataFrame) -> Dict:
+        """Tự động map kiểu dữ liệu (NVARCHAR cho string)"""
+        dtype_map = {}
+        for col in df.columns:
+            if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
+                dtype_map[col] = NVARCHAR(length=None)
+            elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                dtype_map[col] = DATETIME()
+            elif pd.api.types.is_float_dtype(df[col]):
+                dtype_map[col] = FLOAT()
+            elif pd.api.types.is_integer_dtype(df[col]):
+                dtype_map[col] = BIGINT()
+        return dtype_map
+
+    def _get_table_columns(self, table_name: str, conn) -> List[str]:
+        """Lấy danh sách cột hiện có trong DB"""
+        inspector = inspect(conn)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        return columns
+
+    def _add_missing_columns(self, table_name: str, missing_cols: List[str], dtype_map: Dict, conn):
+        """Alter table để thêm cột thiếu (Schema Evolution)"""
+        for col in missing_cols:
+            col_type = dtype_map.get(col, NVARCHAR(255))
+            # SQLAlchemy type to string conversion logic simplified
+            type_str = "NVARCHAR(MAX)" # Default safe fallback
+            if isinstance(col_type, FLOAT): type_str = "FLOAT"
+            elif isinstance(col_type, BIGINT): type_str = "BIGINT"
+            elif isinstance(col_type, DATETIME): type_str = "DATETIME"
+            elif isinstance(col_type, DATE): type_str = "DATE"
+            
+            alter_sql = f"ALTER TABLE [{table_name}] ADD [{col}] {type_str}"
+            conn.execute(text(alter_sql))
+            logger.info(f"Auto-evolve: Added column '{col}' to table '{table_name}'")
+
+    def upsert_data(self, 
+                    df: pd.DataFrame, 
+                    target_table: str, 
+                    match_columns: List[str], 
+                    conflict_strategy: Literal['last', 'skip'] = 'last',
+                    auto_evolve_schema: bool = False):
+        """
+        Hàm Upsert mạnh mẽ.
+        
+        Args:
+            df: DataFrame cần upload.
+            target_table: Tên bảng đích.
+            match_columns: Danh sách cột dùng làm Key so khớp (Primary Key).
+            conflict_strategy: 
+                - 'last': Update ghi đè dữ liệu mới vào dòng cũ (Default).
+                - 'skip': Nếu trùng key thì bỏ qua, không update.
+            auto_evolve_schema: 
+                - True: Tự động thêm cột vào DB nếu DF có cột mới.
+                - False: Bỏ qua các cột trong DF mà DB không có (Strict Schema).
+        """
+        if df.empty:
+            logger.warning(f"DataFrame for {target_table} is empty. Skip.")
+            return
+
+        # 1. Map Unicode Types
+        dtype_mapping = self._generate_dtype_mapping(df)
+        
+        # 2. Staging Table Name
+        staging_table = f"##Staging_{uuid.uuid4().hex[:8]}"
+
+        try:
+            with self.engine.begin() as conn:
+                # --- A. Kiểm tra Schema & Table ---
+                inspector = inspect(conn)
+                if not inspector.has_table(target_table):
+                    logger.info(f"Table {target_table} not found. Creating new...")
+                    df.to_sql(target_table, conn, index=False, dtype=dtype_mapping)
+                    # Tạo Primary Key nếu cần
+                    if match_columns:
+                        pk_str = ", ".join([f"[{c}]" for c in match_columns])
+                        try:
+                            conn.execute(text(f"ALTER TABLE [{target_table}] ADD CONSTRAINT PK_{target_table.replace('.','_')}_{uuid.uuid4().hex[:4]} PRIMARY KEY ({pk_str})"))
+                        except Exception as e:
+                            logger.warning(f"Could not create PK: {e}")
+                    return
+
+                # --- B. Xử lý Schema Evolution ---
+                db_cols = self._get_table_columns(target_table, conn)
+                df_cols = list(df.columns)
+                
+                # Tìm cột có trong DF mà không có trong DB
+                new_cols = [c for c in df_cols if c not in db_cols]
+                
+                if new_cols:
+                    if auto_evolve_schema:
+                        self._add_missing_columns(target_table, new_cols, dtype_mapping, conn)
+                        db_cols.extend(new_cols) # Update danh sách cột DB
+                    else:
+                        # Nếu không auto evolve, chỉ giữ lại các cột khớp với DB
+                        valid_cols = [c for c in df_cols if c in db_cols]
+                        if len(valid_cols) < len(df_cols):
+                            logger.warning(f"Schema strict: Dropping columns {new_cols} because they are not in DB.")
+                            df = df[valid_cols]
+                
+                # --- C. Đẩy vào Staging (Fast Executemany) ---
+                df.to_sql(
+                    name=staging_table,
+                    con=conn,
+                    if_exists='replace',
+                    index=False,
+                    dtype=dtype_mapping
+                )
+
+                # --- D. Thực hiện MERGE ---
+                # Chỉ lấy các cột chung giữa DF và DB để Merge (tránh lỗi cột không tồn tại)
+                common_cols = [c for c in df.columns if c in db_cols]
+                
+                on_clause = " AND ".join([f"Target.[{col}] = Source.[{col}]" for col in match_columns])
+                
+                # Logic Insert
+                insert_cols = ", ".join([f"[{col}]" for col in common_cols])
+                insert_vals = ", ".join([f"Source.[{col}]" for col in common_cols])
+
+                # Logic Update
+                merge_sql = ""
+                
+                # Trường hợp 1: Update ('last')
+                if conflict_strategy == 'last':
+                    update_cols = [c for c in common_cols if c not in match_columns]
+                    if update_cols:
+                        update_set = ", ".join([f"Target.[{col}] = Source.[{col}]" for col in update_cols])
+                        merge_sql = f"""
+                        MERGE [{target_table}] AS Target
+                        USING {staging_table} AS Source
+                        ON {on_clause}
+                        WHEN MATCHED THEN
+                            UPDATE SET {update_set}
+                        WHEN NOT MATCHED BY TARGET THEN
+                            INSERT ({insert_cols}) VALUES ({insert_vals});
+                        """
+                    else:
+                        # Nếu chỉ có cột PK, không có gì để update -> Chỉ Insert if not exists
+                        merge_sql = f"""
+                        MERGE [{target_table}] AS Target
+                        USING {staging_table} AS Source
+                        ON {on_clause}
+                        WHEN NOT MATCHED BY TARGET THEN
+                            INSERT ({insert_cols}) VALUES ({insert_vals});
+                        """
+                
+                # Trường hợp 2: Skip (Chỉ Insert, không Update)
+                elif conflict_strategy == 'skip':
+                    merge_sql = f"""
+                    MERGE [{target_table}] AS Target
+                    USING {staging_table} AS Source
+                    ON {on_clause}
+                    WHEN NOT MATCHED BY TARGET THEN
+                        INSERT ({insert_cols}) VALUES ({insert_vals});
+                    """
+
+                conn.execute(text(merge_sql))
+                conn.execute(text(f"DROP TABLE IF EXISTS {staging_table}"))
+                logger.info(f"Upserted {len(df)} rows to {target_table} (Strategy: {conflict_strategy})")
+
+        except Exception as e:
+            logger.error(f"Upsert failed for {target_table}: {e}")
+            raise e
+
+    def dispose(self):
+        self.engine.dispose()

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: sqlServerConnector
-Version: 0.1.5
+Version: 0.1.8
 Summary: A custom SQL Server Connector for ETL processes with Pandas
 Author-email: Nguyen Minh Son <nguyen.minhson1511@gmail.com>
 Project-URL: Homepage, https://github.com/johnnyb1509/sqlServerConnector
@@ -20,6 +20,9 @@ Requires-Dist: jupyterlab
 # SQL Server Connector
 
 Thư viện kết nối SQL Server chuyên dụng cho các tác vụ ETL, được tối ưu hóa cho **Pandas**, hỗ trợ **Tiếng Việt (Unicode)** và **Upsert (Merge)** hiệu năng cao.
+## Update 0.1.7
+> Sửa lỗi nhỏ liên quan đến việc upsert với các bảng có cột chứa Tiếng Việt
+
 
 ## 🚀 Tính năng nổi bật
 
@@ -66,9 +69,10 @@ db_info:
 ## 📝 Hướng dẫn sử dụng nhanh
 
 1. Khởi tạo kết nối
-```python   
+```python
 import yaml
 from connector import SQLServerConnector
+
 # Load config
 with open('config/db_config.yaml', 'r') as f:
     conf = yaml.safe_load(f)['db_info']
@@ -85,46 +89,68 @@ db = SQLServerConnector(
 2. Lấy dữ liệu (Read)
 ```python
 # Cách 1: Lấy toàn bộ bảng
-df = db.get_data("DM_KhachHang")
+df = db.get_data("SELECT * FROM DM_KhachHang")
 
-# Cách 2: Dùng câu lệnh SQL tùy ý
+# Cách 2: Dùng câu lệnh SQL tuy bien
 query = """
-    SELECT TOP 100 * FROM Sales_Transaction 
-    WHERE created_date >= '2023-01-01'
+    SELECT TOP 100 * FROM Sales_Transaction
+    WHERE created_date >= :from_date
 """
-df_sales = db.get_data(query)
+df_sales = db.get_data(query, params={"from_date": "2023-01-01"})
 print(df_sales.head())
 ```
 
-3. Ghi dữ liệu (Upsert)
+3. Kiểm tra bảng tồn tại
+```python
+if not db.check_table_exists("Fact_Sales"):
+    print("Bang Fact_Sales chua ton tai")
+```
+
+4. Ghi du lieu (Upsert)
 ```python
 import pandas as pd
 
-# Giả lập dữ liệu
+# Gia lap du lieu
 data = {
     'TransactionID': [101, 102],
-    'Product': ['Laptop Dell', 'Chuột Logitech'], # Hỗ trợ tiếng Việt
+    'Product': ['Laptop Dell', 'Chuot Logitech'],  # Ho tro tieng Viet
     'Amount': [15000000, 250000]
 }
 df_new = pd.DataFrame(data)
 
-# Đẩy vào DB
+# Day vao DB
 db.upsert_data(
     df=df_new,
     target_table="Fact_Sales",
-    primary_key="TransactionID",  # Cột dùng để định danh (tránh trùng lặp)
-    auto_evolve_schema=True       # Tự động thêm cột nếu thiếu
+    match_columns=["TransactionID"],  # Khoa so khop (Primary Key)
+    conflict_strategy="last",         # "last" hoac "skip"
+    auto_evolve_schema=True            # Tu dong them cot neu thieu
 )
-print("Dữ liệu đã được upsert thành công!")
+print("Du lieu da duoc upsert thanh cong!")
 ```
 
-4. Đóng kết nối
+5. Thuc thi cau lenh khong tra ve du lieu
 ```python
-# Luôn đóng kết nối khi hoàn tất để giải phóng tài nguyên
+# Vi du: xoa du lieu cu
+db.execute_query(
+    "DELETE FROM Fact_Sales WHERE created_date < :cutoff",
+    params={"cutoff": "2023-01-01"}
+)
+```
+
+6. Dong ket noi
+```python
+# Luon dong ket noi khi hoan tat de giai phong tai nguyen
 db.dispose()
 ```
 
 ## ⚠️ Lưu ý quan trọng
-1. **Primary Key:** Khi dùng upsert_data, bắt buộc phải cung cấp primary_key. Nếu bảng chưa có Primary Key, thư viện sẽ tự set cột đó làm khóa chính khi tạo bảng mới.
+1. **Primary Key:** Khi dùng upsert_data, bat buoc phai cung cap `match_columns`. Neu bang chua co Primary Key, thu vien se co gang set cac cot nay lam khoa chinh khi tao bang moi.
 
 2. **Date Time:** Các cột ngày tháng nên được convert sang datetime64[ns] trong Pandas trước khi đẩy vào để đảm bảo tính chính xác.
+
+3. **Upgrade version:** Luôn kiểm tra và cập nhật lên phiên bản mới nhất để tận dụng các tính năng và sửa lỗi mới nhất. For developer, change version in `pyproject.toml` and build & upload to PyPI:   
+```bash
+python -m build
+python -m twine upload dist/*
+```
