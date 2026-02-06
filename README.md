@@ -2,7 +2,10 @@
 
 Thư viện kết nối SQL Server chuyên dụng cho các tác vụ ETL, được tối ưu hóa cho **Pandas**, hỗ trợ **Tiếng Việt (Unicode)** và **Upsert (Merge)** hiệu năng cao.
 
-### **Update 0.1.8**
+### **Update 0.1.9**
+> Thay vì dùng bảng tạm (##Staging), sẽ dùng bảng vật lý tạm thời (Physical Staging Table) có tên chứa UUID (để đảm bảo duy nhất, không trùng lặp giữa các luồng chạy). Sau khi Upsert xong, ta sẽ DROP bảng này ngay lập tức. Cách này tương thích 100% với Pandas và SQLAlchemy.
+
+### **Update 0.1.7**
 > Sửa lỗi nhỏ liên quan đến việc upsert với các bảng có cột chứa Tiếng Việt
 
 
