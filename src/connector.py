@@ -253,6 +253,14 @@ class SQLServerConnector:
         
         if not join_keys:
              logger.warning(f"No keys provided for {target_table}. Switching to APPEND mode.")
+        else:
+            # --- CRITICAL FIX FOR UNIQUE KEY VIOLATION ---
+            # Remove duplicates in Python before sending to Staging Table
+            # This prevents MERGE from crashing when Source has duplicate keys
+            initial_count = len(df)
+            df = df.drop_duplicates(subset=join_keys, keep='last').copy()
+            if len(df) < initial_count:
+                logger.warning(f"Dropped {initial_count - len(df)} duplicate rows based on keys {join_keys} before upsert.")
 
         # 2. Xử lý Logic 'SUM' (Aggregation tại Python trước khi đẩy DB)
         # Đây là logic quý giá từ code cũ của bạn
