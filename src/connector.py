@@ -227,67 +227,64 @@ class SQLServerConnector:
                     match_columns: Optional[List[str]] = None, 
                     auto_evolve_schema: bool = True,
                     conflict_strategy: Literal['sum', 'last', 'skip'] = 'last'):
-        """
-        Hàm Upsert đa năng (Hợp nhất Logic cũ và mới).
         
-        Args:
-            df: DataFrame đầu vào.
-            target_table: Tên bảng đích.
-            primary_key: Tên cột khóa chính (str hoặc list) - Param cũ.
-            match_columns: Danh sách cột khóa chính - Param mới.
-            auto_evolve_schema: Tự động thêm cột mới vào DB.
-            conflict_strategy: 
-                - 'sum': Cộng dồn các cột số, lấy giá trị đầu tiên các cột khác (Logic tài chính).
-                - 'last': Update ghi đè (Logic thông tin mới nhất).
-                - 'skip': Bỏ qua nếu trùng khóa.
-        """
         if df.empty:
             return
 
-        # 1. Xác định Join Keys (Hợp nhất 2 param)
-        join_keys = []
-        if match_columns:
-            join_keys = match_columns
-        elif primary_key:
-            join_keys = [primary_key] if isinstance(primary_key, str) else primary_key
-        
+        df = df.copy()
+
+        # 1. FORCE DATES TO DATETIME64 EARLY
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                idx = df[col].first_valid_index()
+                if idx is not None:
+                    val = df[col].loc[idx]
+                    if hasattr(val, 'year') and hasattr(val, 'month') and hasattr(val, 'day'):
+                        try:
+                            df[col] = pd.to_datetime(df[col])
+                        except Exception:
+                            pass
+
+        # 2. Xác định Join Keys
+        join_keys = match_columns or (
+            [primary_key] if isinstance(primary_key, str) else primary_key
+        ) or []
+
         if not join_keys:
              logger.warning(f"No keys provided for {target_table}. Switching to APPEND mode.")
         else:
-            # --- CRITICAL FIX FOR UNIQUE KEY VIOLATION ---
-            # Remove duplicates in Python before sending to Staging Table
-            # This prevents MERGE from crashing when Source has duplicate keys
+            # 3. Aggregation & Deduplication
             initial_count = len(df)
-            df = df.drop_duplicates(subset=join_keys, keep='last').copy()
-            if len(df) < initial_count:
-                logger.warning(f"Dropped {initial_count - len(df)} duplicate rows based on keys {join_keys} before upsert.")
-
-        # 2. Xử lý Logic 'SUM' (Aggregation tại Python trước khi đẩy DB)
-        # Đây là logic quý giá từ code cũ của bạn
-        if conflict_strategy == 'sum' and join_keys:
-            # Xác định cột số
-            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            num_cols = [c for c in num_cols if c not in join_keys]
-            
-            # Logic Aggregation
-            agg_logic = {col: 'sum' for col in num_cols}
-            
-            # Các cột còn lại (text, date...) lấy dòng đầu tiên
-            other_cols = [c for c in df.columns if c not in join_keys and c not in num_cols]
-            for c in other_cols:
-                agg_logic[c] = 'first'
+            if conflict_strategy == 'sum':
+                num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                num_cols = [c for c in num_cols if c not in join_keys]
                 
-            # Thực hiện GroupBy
-            initial_len = len(df)
-            df = df.groupby(join_keys, as_index=False).agg(agg_logic)
-            
-            if len(df) < initial_len:
-                logger.info(f"Strategy 'sum': Aggregated {initial_len} -> {len(df)} rows.")
+                agg_logic = {col: 'sum' for col in num_cols}
+                other_cols = [c for c in df.columns if c not in join_keys and c not in num_cols]
+                for c in other_cols:
+                    agg_logic[c] = 'last'
+                    
+                df = df.groupby(join_keys, as_index=False).agg(agg_logic)
+                if len(df) < initial_count:
+                    logger.info(f"Strategy 'sum': Aggregated {initial_count} -> {len(df)} rows.")
+            else:
+                keep_val = 'last' if conflict_strategy == 'last' else 'first'
+                df = df.drop_duplicates(subset=join_keys, keep=keep_val).copy()
+                if len(df) < initial_count:
+                    logger.warning(f"Dropped {initial_count - len(df)} duplicate rows based on keys {join_keys}.")
 
-        # 3. Map Unicode Types
+        # 4. GENERATE DTYPE MAPPING *BEFORE* NULL-SAFETY CASTING
+        # Because df['date'] is datetime64 right now, it correctly maps to DATETIME()
         dtype_mapping = self._generate_dtype_mapping(df)
         
-        # 4. Staging Table Name (Dùng bảng vật lý unique)
+        # 5. NULL-SAFETY FOR PYODBC
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                if col in join_keys:
+                    df[col] = df[col].dt.normalize()
+                # This makes the column an 'object' holding None, but the mapping is already saved!
+                df[col] = df[col].astype(object).where(df[col].notnull(), None)
+
         staging_table = f"Staging_{uuid.uuid4().hex[:10]}"
 
         try:
@@ -297,16 +294,15 @@ class SQLServerConnector:
                 if not inspector.has_table(target_table):
                     logger.info(f"Table {target_table} not found. Creating new...")
                     df.to_sql(target_table, conn, index=False, dtype=dtype_mapping)
-                    
                     if join_keys:
                         pk_str = ", ".join([f"[{c}]" for c in join_keys])
                         try:
                             conn.execute(text(f"ALTER TABLE [{target_table}] ADD CONSTRAINT PK_{target_table.replace('.','_')}_{uuid.uuid4().hex[:4]} PRIMARY KEY ({pk_str})"))
                         except Exception as e:
                             logger.warning(f"Could not create PK: {e}")
-                    return # Đã insert xong do tạo bảng mới
+                    return 
 
-                # --- B. Schema Evolution (Code cũ gọi là _sync_columns) ---
+                # --- B. Schema Evolution ---
                 db_cols = self._get_table_columns(target_table, conn)
                 df_cols = list(df.columns)
                 new_cols = [c for c in df_cols if c not in db_cols]
@@ -316,7 +312,6 @@ class SQLServerConnector:
                         self._add_missing_columns(target_table, new_cols, dtype_mapping, conn)
                         db_cols.extend(new_cols)
                     else:
-                        # Nếu không evolve, bỏ cột thừa đi
                         valid_cols = [c for c in df_cols if c in db_cols]
                         df = df[valid_cols]
 
@@ -329,41 +324,40 @@ class SQLServerConnector:
                     dtype=dtype_mapping
                 )
 
-                # --- D. MERGE Logic ---
-                # Nếu strategy là 'sum', sau khi aggregate ở Python, nó trở thành 'update' (ghi đè kết quả tổng vào DB)
-                # Hoặc nếu DB đã có số liệu, logic Merge chuẩn là update lại số mới.
-                
+                # --- D. Dynamic MERGE Logic ---
                 if join_keys:
                     common_cols = [c for c in df.columns if c in db_cols]
-                    on_clause = " AND ".join([f"Target.[{col}] = Source.[{col}]" for col in join_keys])
+                    
+                    on_conditions = []
+                    for col in join_keys:
+                        on_conditions.append(f"(Target.[{col}] = Source.[{col}] OR (Target.[{col}] IS NULL AND Source.[{col}] IS NULL))")
+                    on_clause = " AND ".join(on_conditions)
                     
                     insert_cols = ", ".join([f"[{col}]" for col in common_cols])
                     insert_vals = ", ".join([f"Source.[{col}]" for col in common_cols])
+                    
+                    merge_target = f"[{target_table}] WITH (HOLDLOCK)"
 
                     merge_sql = ""
-                    
-                    # Logic: 'last' hoặc 'sum' (sau khi agg) đều là UPDATE
                     if conflict_strategy in ['last', 'sum']:
                         update_cols = [c for c in common_cols if c not in join_keys]
                         if update_cols:
                             update_set = ", ".join([f"Target.[{col}] = Source.[{col}]" for col in update_cols])
                             merge_sql = f"""
-                            MERGE [{target_table}] AS Target USING [{staging_table}] AS Source
+                            MERGE {merge_target} AS Target USING [{staging_table}] AS Source
                             ON {on_clause}
                             WHEN MATCHED THEN UPDATE SET {update_set}
                             WHEN NOT MATCHED BY TARGET THEN INSERT ({insert_cols}) VALUES ({insert_vals});
                             """
                         else:
-                            # Chỉ có Key, Insert if not exists
                             merge_sql = f"""
-                            MERGE [{target_table}] AS Target USING [{staging_table}] AS Source
+                            MERGE {merge_target} AS Target USING [{staging_table}] AS Source
                             ON {on_clause}
                             WHEN NOT MATCHED BY TARGET THEN INSERT ({insert_cols}) VALUES ({insert_vals});
                             """
-                    
                     elif conflict_strategy == 'skip':
                         merge_sql = f"""
-                        MERGE [{target_table}] AS Target USING [{staging_table}] AS Source
+                        MERGE {merge_target} AS Target USING [{staging_table}] AS Source
                         ON {on_clause}
                         WHEN NOT MATCHED BY TARGET THEN INSERT ({insert_cols}) VALUES ({insert_vals});
                         """
@@ -371,7 +365,6 @@ class SQLServerConnector:
                     conn.execute(text(merge_sql))
                     logger.success(f"Upserted {len(df)} rows to {target_table} (Strategy: {conflict_strategy})")
                 else:
-                    # Append Mode
                     insert_cols = ", ".join([f"[{col}]" for col in df.columns])
                     conn.execute(text(f"INSERT INTO [{target_table}] ({insert_cols}) SELECT {insert_cols} FROM [{staging_table}]"))
                     logger.info(f"Appended {len(df)} rows to {target_table}")
@@ -385,9 +378,6 @@ class SQLServerConnector:
                     conn.execute(text(f"IF OBJECT_ID('{staging_table}', 'U') IS NOT NULL DROP TABLE [{staging_table}]"))
             except Exception:
                 pass
-
-    def dispose(self):
-        self.engine.dispose()
 
     def dispose(self):
         self.engine.dispose()
