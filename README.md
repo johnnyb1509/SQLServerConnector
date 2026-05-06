@@ -2,12 +2,12 @@
 
 Thư viện kết nối SQL Server chuyên dụng cho các tác vụ ETL, được tối ưu hóa cho **Pandas**, hỗ trợ **Tiếng Việt (Unicode)** và **Upsert (Merge)** hiệu năng cao.
 
-### **Update 0.1.9**
-> Thay vì dùng bảng tạm (##Staging), sẽ dùng bảng vật lý tạm thời (Physical Staging Table) có tên chứa UUID (để đảm bảo duy nhất, không trùng lặp giữa các luồng chạy). Sau khi Upsert xong, ta sẽ DROP bảng này ngay lập tức. Cách này tương thích 100% với Pandas và SQLAlchemy.
+### **Update 0.1.24**
+- **Về mặt Logic (Coverage):** Toàn bộ các "tuyệt chiêu" bạn đã viết như conflict_strategy (sum, last, skip), auto_evolve_schema (tự động thêm cột), hay tự động dò Data Type (_generate_dtype_mapping) đều được giữ nguyên vẹn 100%.
 
-### **Update 0.1.7**
-> Sửa lỗi nhỏ liên quan đến việc upsert với các bảng có cột chứa Tiếng Việt
+- **Về mặt Transaction (Giao dịch):** Ở phiên bản cũ, bạn gộp toàn bộ quá trình: Tạo bảng -> Thêm cột -> Tạo bảng Staging -> Đổ data -> Chạy lệnh MERGE vào chung một giao dịch duy nhất (with self.engine.begin()). Việc này rủi ro ở chỗ: nếu quá trình dài bị đứt kết nối giữa chừng, hoặc thư viện Pandas ngầm commit, toàn bộ sẽ bị kẹt hoặc rollback trong im lặng.
 
+- **Ở phiên bản mới:** Chúng ta chuyển sang mô hình Micro-transactions (Giao dịch chia nhỏ) dùng engine.connect() và ép conn.commit() cho từng chặng. Điều này tương thích hoàn hảo với sự khắt khe của SQLAlchemy 2.0+, giúp đảm bảo lệnh nào chạy xong là "chốt sổ" lệnh đó, bất chấp bạn dùng driver pyodbc hay pymssql.
 
 ## 🚀 Tính năng nổi bật
 
@@ -18,7 +18,6 @@ Thư viện kết nối SQL Server chuyên dụng cho các tác vụ ETL, đư�
 * **SQLAlchemy 2.0:** Tuân thủ chuẩn kết nối hiện đại, an toàn.
 
 ---
-
 ## 📦 Cài đặt
 
 ### Cách 1: Cài đặt trực tiếp từ Git (Khuyên dùng nội bộ)
